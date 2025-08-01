@@ -3,7 +3,6 @@ import json
 from pydub import AudioSegment
 import pyloudnorm as pyln
 import librosa
-from srmrpy import srmr
 
 def load_mp3_as_mono(file_path):
     audio = AudioSegment.from_mp3(file_path).set_channels(1)
@@ -17,15 +16,6 @@ def check_loudness(audio_data, sample_rate):
     lra = meter.loudness_range(audio_data)
     return lufs, lra
 
-def check_srmr(audio_data, sample_rate):
-    srmr_score = srmr(audio_data, fs=sample_rate)
-    if isinstance(srmr_score, (list, np.ndarray)):
-        srmr_reverb = srmr_score[0]
-        srmr_intelligibility = np.mean(srmr_score[:4])
-    else:
-        srmr_reverb = srmr_intelligibility = srmr_score
-    return srmr_reverb, srmr_intelligibility
-
 def check_interruptions(audio_data, sample_rate):
     S = librosa.stft(audio_data, n_fft=1024)
     power_db = librosa.amplitude_to_db(np.abs(S), ref=np.max)
@@ -34,12 +24,30 @@ def check_interruptions(audio_data, sample_rate):
     total_bins = power_db.size
     return above_mean / total_bins
 
+def estimate_srmr_intelligibility(audio_data, sample_rate):
+    # Break signal into frames
+    hop_length = 512
+    frame_length = 1024
+    frames = librosa.util.frame(audio_data, frame_length=frame_length, hop_length=hop_length).T
+
+    modulation_energies = []
+    for frame in frames:
+        # Hilbert envelope
+        envelope = np.abs(librosa.effects.hilbert(frame))
+        # FFT of envelope gives modulation spectrum
+        modulation_spectrum = np.abs(np.fft.rfft(envelope))
+        modulation_energy = np.sum(modulation_spectrum[4:20]) / (np.sum(modulation_spectrum) + 1e-6)  # 4–20 Hz band
+        modulation_energies.append(modulation_energy)
+
+    intelligibility_score = np.mean(modulation_energies)
+    return intelligibility_score
+
 def analyze_audio(file_path, output_json_path='analysis_result.json'):
     audio_data, sr = load_mp3_as_mono(file_path)
 
     lufs, lra = check_loudness(audio_data, sr)
-    srmr_reverb, srmr_intel = check_srmr(audio_data, sr)
     interruptions = check_interruptions(audio_data, sr)
+    srmr_intel = estimate_srmr_intelligibility(audio_data, sr)
 
     results = {
         "lufs": {
@@ -50,11 +58,7 @@ def analyze_audio(file_path, output_json_path='analysis_result.json'):
             "value": round(lra, 2),
             "acceptable": lra < 5
         },
-        "srmr_reverb": {
-            "value": round(srmr_reverb, 2),
-            "acceptable": srmr_reverb > 2.7
-        },
-        "srmr_intelligibility": {
+        "srmr_intelligibility_approx": {
             "value": round(srmr_intel, 2),
             "acceptable": srmr_intel > 3.5
         },
@@ -69,6 +73,6 @@ def analyze_audio(file_path, output_json_path='analysis_result.json'):
 
     return results
 
-# Example usage
-# result = analyze_audio("your_file.mp3")
+# Example usage:
+# result = analyze_audio("your_audio_file.mp3")
 # print(json.dumps(result, indent=4))
